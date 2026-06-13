@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.4 — 2026-06-13
+
+### Fixed / changed
+- **Validate the Modbus TCP MBAP header.** The `tcp` path now checks the protocol id
+  (must be 0), a sane length, and that the transaction id echoes the request. A stale or
+  desynced reply (or a wrong-`protocol` setting) now raises a clear `ModbusError` — caught
+  by the per-register fallback, with the next request re-draining — instead of reading a
+  garbage-length payload.
+
+### Notes
+- Diagnosis: gateways that present an MBAP header (protocol id `0x0000`) with **no** RTU CRC
+  footer are Modbus **TCP** — use `protocol: tcp`. The earlier `tcp` failures were the
+  stale-buffer desync fixed in 1.0.2, not a wrong protocol.
+
 ## 1.0.3 — 2026-06-13
 
 ### Diagnostics

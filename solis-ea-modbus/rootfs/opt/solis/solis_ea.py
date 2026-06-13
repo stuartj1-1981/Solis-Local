@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover
     HAS_MQTT = False
     logging.warning("paho-mqtt not installed — MQTT publishing disabled")
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 # =============================================================================
 # Defaults (overridden by environment variables from the S6 run script)
@@ -301,8 +301,19 @@ class SolisModbus:
                 mbap = struct.pack(">HHHB", self.tid, 0, len(pdu) + 1, self.unit)
                 self.sock.sendall(mbap + pdu)
                 header = self._recv_exact(7)
-                _tid, _pid, length, _uid = struct.unpack(">HHHB", header)
+                r_tid, r_pid, length, _uid = struct.unpack(">HHHB", header)
+                # Validate the MBAP header: protocol id must be 0, length must be sane,
+                # and the transaction id must echo ours. A mismatch means a stale/desynced
+                # frame (or the wrong protocol) — raise so the fallback handles it and the
+                # next request re-drains, rather than reading a garbage-length payload.
+                if r_pid != 0 or not (2 <= length <= 260):
+                    raise ModbusError(f"bad MBAP (check `protocol`): "
+                                      f"tid=0x{r_tid:04X} pid=0x{r_pid:04X} len={length} "
+                                      f"hdr={header.hex()}")
                 resp = self._recv_exact(length - 1)
+                if r_tid != self.tid:
+                    raise ModbusError(f"MBAP tid mismatch: sent 0x{self.tid:04X} "
+                                      f"got 0x{r_tid:04X} (stale frame) hdr={header.hex()}")
         finally:
             self._last_txn = time.monotonic()
 
