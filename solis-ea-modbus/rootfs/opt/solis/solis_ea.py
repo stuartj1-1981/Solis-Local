@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover
     HAS_MQTT = False
     logging.warning("paho-mqtt not installed — MQTT publishing disabled")
 
-VERSION = "1.0.6"
+VERSION = "1.0.7"
 
 # =============================================================================
 # Defaults (overridden by environment variables from the S6 run script)
@@ -609,13 +609,17 @@ class SolisController:
             try:
                 regs = self.modbus.read(fc, sub_start, sub_count)
                 out.update({sub_start + i: regs[i] for i in range(len(regs))})
-            except ModbusError as e:
+            except (ModbusError, TimeoutError) as e:
+                # A single unanswered read (no-reply timeout, CRC, or exception) must not
+                # abort the whole cycle — skip it, leave a gap, and carry on. The next
+                # request re-drains, so a late reply can't desync us. Only a real socket
+                # break (ConnectionError) propagates to trigger a reconnect.
                 logging.warning("Block read fc%d %d+%d failed (%s) — per-register fallback",
                                 fc, sub_start, sub_count, e)
                 for a in range(sub_start, sub_start + sub_count):
                     try:
                         out[a] = self.modbus.read(fc, a, 1)[0]
-                    except ModbusError:
+                    except (ModbusError, TimeoutError):
                         pass  # leave gap; keep last published value
         return out
 

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.7 — 2026-06-13
+
+### Fixed
+- **A single read timeout no longer drops the connection.** Previously any no-reply
+  timeout raised `OSError` and aborted the whole poll → reconnect + backoff every cycle.
+  Now a timeout on one read (or chunk) is treated like any other failed read: it's skipped,
+  leaves a gap, and the cycle continues. Only a real socket break (`ConnectionError`)
+  triggers a reconnect. The per-chunk warning also narrows a persistently stalling
+  register to ≤2 addresses for diagnosis.
+
 ## 1.0.6 — 2026-06-13
 
 ### Fixed
