@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.5 — 2026-06-13
+
+### Fixed
+- **Split block reads to fit small gateway response buffers.** Some TCP gateways cap their
+  reply size (observed: reads over ~5 registers truncated to ~11 data bytes, failing the
+  22- and 21-register telemetry blocks). Block reads are now chunked into
+  `MAX_REGS_PER_READ` (5) registers each, with the per-register fallback retained per chunk.
+  This removes the `bad byte count` warnings and reads the big telemetry blocks efficiently
+  instead of one register at a time.
+
 ## 1.0.4 — 2026-06-13
 
 ### Fixed / changed

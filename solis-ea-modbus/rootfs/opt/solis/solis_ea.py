@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover
     HAS_MQTT = False
     logging.warning("paho-mqtt not installed — MQTT publishing disabled")
 
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 
 # =============================================================================
 # Defaults (overridden by environment variables from the S6 run script)
@@ -95,6 +95,12 @@ TELEMETRY = [
     {"oid": "energy_today",         "addr": 33035, "words": 1, "signed": False, "scale": 0.1,  "unit": "kWh", "dclass": "energy",      "sclass": "total_increasing", "name": "Energy Today"},
     {"oid": "inverter_temperature", "addr": 33093, "words": 1, "signed": True,  "scale": 0.1,  "unit": "°C",  "dclass": "temperature", "sclass": "measurement", "name": "Inverter Temperature"},
 ]
+
+# Max registers per Modbus read. Cheap TCP gateways cap their response buffer
+# (observed: reads > ~5 registers came back truncated to ~11 data bytes), so block
+# reads are split into chunks of this size. Conservative; raise it if your gateway
+# returns larger frames cleanly.
+MAX_REGS_PER_READ = 5
 
 # Telemetry block reads (FC04). Each: (start, count). Kept <= 50 registers.
 TELEMETRY_BLOCKS = [
@@ -590,21 +596,28 @@ class SolisController:
                 delay = min(delay * 2, self.config["reconnect_max_delay"])
         return False
 
-    # ---- block reads with per-address fallback ------------------------------
+    # ---- block reads with chunking + per-address fallback -------------------
     def _read_block(self, fc: int, start: int, count: int) -> dict:
-        try:
-            regs = self.modbus.read(fc, start, count)
-            return {start + i: regs[i] for i in range(len(regs))}
-        except ModbusError as e:
-            logging.warning("Block read fc%d %d+%d failed (%s) — per-register fallback",
-                            fc, start, count, e)
-            out = {}
-            for a in range(start, start + count):
-                try:
-                    out[a] = self.modbus.read(fc, a, 1)[0]
-                except ModbusError:
-                    pass  # leave gap; keep last published value
-            return out
+        """Read `count` registers from `start`, split into <= MAX_REGS_PER_READ chunks
+        so a gateway that caps its response size doesn't truncate. A chunk that still
+        fails (CRC/exception/short frame) drops to a per-register fallback, leaving gaps
+        for registers the inverter doesn't expose rather than failing the whole block."""
+        out = {}
+        for off in range(0, count, MAX_REGS_PER_READ):
+            sub_start = start + off
+            sub_count = min(MAX_REGS_PER_READ, count - off)
+            try:
+                regs = self.modbus.read(fc, sub_start, sub_count)
+                out.update({sub_start + i: regs[i] for i in range(len(regs))})
+            except ModbusError as e:
+                logging.warning("Block read fc%d %d+%d failed (%s) — per-register fallback",
+                                fc, sub_start, sub_count, e)
+                for a in range(sub_start, sub_start + sub_count):
+                    try:
+                        out[a] = self.modbus.read(fc, a, 1)[0]
+                    except ModbusError:
+                        pass  # leave gap; keep last published value
+        return out
 
     # ---- telemetry ----------------------------------------------------------
     def _poll_telemetry(self):
