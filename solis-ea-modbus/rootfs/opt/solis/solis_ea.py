@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover
     HAS_MQTT = False
     logging.warning("paho-mqtt not installed — MQTT publishing disabled")
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 
 # =============================================================================
 # Defaults (overridden by environment variables from the S6 run script)
@@ -234,6 +234,29 @@ class SolisModbus:
         if gap < self.inter_frame:
             time.sleep(self.inter_frame - gap)
 
+    def _drain(self):
+        """Discard any stale bytes sitting in the socket buffer before sending a
+        request, so the reply we read belongs to THIS transaction. Cheap RTU-over-TCP
+        gateways share one serial buffer and don't frame-delimit, so a late or partial
+        frame left over from a previous poll (or a killed connection) would otherwise be
+        read as the next response and desync the stream until reconnect."""
+        if not self.sock:
+            return
+        self.sock.setblocking(False)
+        dropped = 0
+        try:
+            while True:
+                chunk = self.sock.recv(512)
+                if not chunk:
+                    break  # peer closed; let the next recv surface it
+                dropped += len(chunk)
+        except (BlockingIOError, OSError):
+            pass  # nothing left to read
+        finally:
+            self.sock.settimeout(self.timeout)
+        if dropped:
+            logging.debug("Drained %d stale byte(s) before request", dropped)
+
     def _recv_exact(self, n: int) -> bytes:
         buf = b""
         while len(buf) < n:
@@ -247,6 +270,7 @@ class SolisModbus:
         """Send a PDU (function code + payload), return the response PDU."""
         self._pace()
         try:
+            self._drain()  # flush stale bytes so the reply matches this request
             if self.protocol == "rtu_over_tcp":
                 frame = bytes([self.unit]) + pdu
                 frame += struct.pack("<H", crc16_modbus(frame))

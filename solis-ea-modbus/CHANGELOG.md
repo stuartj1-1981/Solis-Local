@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.2 — 2026-06-13
+
+### Fixed
+- **`rtu_over_tcp`: recover from gateway buffer desync.** Stale bytes left in the gateway's
+  shared serial buffer (a late/partial frame from a previous poll, or a connection killed
+  mid-transaction) were read as the next response, causing a persistent `RTU CRC mismatch`
+  → `timed out` → reconnect loop that never recovered. The socket buffer is now flushed
+  before every request (`_drain`), so each transaction starts frame-aligned and the stream
+  self-heals instead of looping. Set `debug: true` to log how many stale bytes are dropped.
+
 ## 1.0.1 — 2026-06-13
 
 ### Fixed
