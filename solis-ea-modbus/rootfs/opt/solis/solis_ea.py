@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover
     HAS_MQTT = False
     logging.warning("paho-mqtt not installed — MQTT publishing disabled")
 
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 
 # =============================================================================
 # Defaults (overridden by environment variables from the S6 run script)
@@ -96,11 +96,11 @@ TELEMETRY = [
     {"oid": "inverter_temperature", "addr": 33093, "words": 1, "signed": True,  "scale": 0.1,  "unit": "°C",  "dclass": "temperature", "sclass": "measurement", "name": "Inverter Temperature"},
 ]
 
-# Max registers per Modbus read. Cheap TCP gateways cap their response buffer
-# (observed: reads > ~5 registers came back truncated to ~11 data bytes), so block
-# reads are split into chunks of this size. Conservative; raise it if your gateway
-# returns larger frames cleanly.
-MAX_REGS_PER_READ = 5
+# Max registers per Modbus read. This gateway is picky about read size: large reads
+# truncate (~11 data bytes) and mid-size reads (~5) draw a "gateway path unavailable"
+# (0x0A) that then wedges it. Only 1-2 register reads proved reliable, so block reads
+# are split into chunks of this size. Raise it if your gateway tolerates larger frames.
+MAX_REGS_PER_READ = 2
 
 # Telemetry block reads (FC04). Each: (start, count). Kept <= 50 registers.
 TELEMETRY_BLOCKS = [
@@ -793,6 +793,7 @@ class SolisController:
         if not self._connect_bus():
             return
 
+        fail_streak = 0
         while self.running:
             cycle_start = time.monotonic()
             try:
@@ -806,10 +807,19 @@ class SolisController:
                     self._drain_commands()
 
                 self.mqtt.publish_status(True)
+                fail_streak = 0  # healthy cycle — reset backoff
 
             except (ConnectionError, OSError) as e:
-                logging.warning("Bus I/O error: %s — reconnecting", e)
+                # A flaky gateway can accept TCP but stop answering Modbus (it wedges
+                # after a "gateway path unavailable"). Reconnecting immediately just
+                # hammers it, so back off exponentially to give it time to recover.
+                fail_streak += 1
+                backoff = min(self.config["reconnect_delay"] * (2 ** (fail_streak - 1)),
+                              self.config["reconnect_max_delay"])
+                logging.warning("Bus I/O error: %s — backing off %ss then reconnecting "
+                                "(failure %d)", e, backoff, fail_streak)
                 self.mqtt.publish_status(False)
+                time.sleep(backoff)
                 if not self._connect_bus():
                     break
                 continue

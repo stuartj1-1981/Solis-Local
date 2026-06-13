@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.6 — 2026-06-13
+
+### Fixed
+- **Smaller reads for picky gateways.** `MAX_REGS_PER_READ` lowered 5 → 2. A 5-register
+  read drew a `gateway path unavailable` (0x0A) exception from the gateway and then wedged
+  it; 1–2 register reads are stable.
+- **No more reconnect storm.** When the gateway accepts TCP but stops answering Modbus,
+  the poll loop now backs off exponentially (`reconnect_delay` → `reconnect_max_delay`)
+  instead of reconnecting and re-polling every few seconds, giving the gateway time to
+  recover. The backoff resets after a healthy cycle.
+
 ## 1.0.5 — 2026-06-13
 
 ### Fixed
