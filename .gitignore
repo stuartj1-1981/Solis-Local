@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+# local Claude Code settings
+.claude/
+
+# one-off build prompt, not part of the add-on
+INSTRUCTION_*.md
