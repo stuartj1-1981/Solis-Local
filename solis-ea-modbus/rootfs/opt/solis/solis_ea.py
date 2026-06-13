@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover
     HAS_MQTT = False
     logging.warning("paho-mqtt not installed — MQTT publishing disabled")
 
-VERSION = "1.0.8"
+VERSION = "1.0.9"
 
 # =============================================================================
 # Defaults (overridden by environment variables from the S6 run script)
@@ -637,15 +637,23 @@ class SolisController:
         regs = {}
         for start, count in TELEMETRY_BLOCKS:
             regs.update(self._read_block(0x04, start, count))
+        published = 0
         for s in TELEMETRY:
             val = decode(regs, s)
             if val is not None:
                 self.mqtt.publish(f"{self.config['mqtt_base_topic']}/{s['oid']}/state", str(val))
+                published += 1
         # Battery charge/discharge flag
         flag = regs.get(BATTERY_FLAG_ADDR)
         if flag is not None:
             text = {0: "Charging", 1: "Discharging"}.get(flag, f"State {flag}")
             self.mqtt.publish(f"{self.config['mqtt_base_topic']}/battery_status/state", text)
+        # Heartbeat so a healthy run is visible: log the first poll and then periodically.
+        self._poll_count = getattr(self, "_poll_count", 0) + 1
+        if self._poll_count == 1 or self._poll_count % 30 == 0:
+            logging.info("Telemetry poll #%d: published %d/%d values (MQTT %s)",
+                         self._poll_count, published, len(TELEMETRY),
+                         "up" if self.mqtt.connected else "DOWN")
 
     # ---- control state reflection ------------------------------------------
     def _poll_control(self):
@@ -813,6 +821,7 @@ class SolisController:
                 if not self.discovery_sent and self.mqtt.connected:
                     self.mqtt.send_all_discovery()
                     self.discovery_sent = True
+                    logging.info("MQTT discovery published — entities should appear in HA")
 
                 self._poll_telemetry()
                 if self.config["enable_control"]:

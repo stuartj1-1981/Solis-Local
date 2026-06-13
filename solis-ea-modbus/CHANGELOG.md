@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.9 — 2026-06-13
+
+### Added
+- **Heartbeat logging so a healthy run is visible.** A successful poll used to log nothing,
+  making "is it actually working?" impossible to tell. Now logs `MQTT discovery published`
+  once, and `Telemetry poll #N: published X/12 values (MQTT up)` on the first poll and every
+  30th — confirming the loop is alive, values decode, and MQTT is connected.
+
 ## 1.0.8 — 2026-06-13
 
 ### Fixed
