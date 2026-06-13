@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover
     HAS_MQTT = False
     logging.warning("paho-mqtt not installed — MQTT publishing disabled")
 
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
 # =============================================================================
 # Defaults (overridden by environment variables from the S6 run script)
@@ -257,6 +257,26 @@ class SolisModbus:
         if dropped:
             logging.debug("Drained %d stale byte(s) before request", dropped)
 
+    def _peek_waiting(self, limit: int = 64) -> bytes:
+        """Non-blocking read of whatever is still in the socket buffer — diagnostic only,
+        used to dump context on a framing/CRC error. Bytes are consumed, but the next
+        request drains anyway, so this never disturbs a healthy stream."""
+        if not self.sock:
+            return b""
+        self.sock.setblocking(False)
+        buf = b""
+        try:
+            while len(buf) < limit:
+                chunk = self.sock.recv(limit - len(buf))
+                if not chunk:
+                    break
+                buf += chunk
+        except (BlockingIOError, OSError):
+            pass
+        finally:
+            self.sock.settimeout(self.timeout)
+        return buf
+
     def _recv_exact(self, n: int) -> bytes:
         buf = b""
         while len(buf) < n:
@@ -308,8 +328,14 @@ class SolisModbus:
         else:
             rest = self._recv_exact(6)
             frame = head + rest
-        if crc16_modbus(frame[:-2]) != struct.unpack("<H", frame[-2:])[0]:
-            raise ModbusError("RTU CRC mismatch")
+        calc = crc16_modbus(frame[:-2])
+        got = struct.unpack("<H", frame[-2:])[0]
+        if calc != got:
+            extra = self._peek_waiting()  # reveals a prefix byte / missing CRC / next frame
+            raise ModbusError(
+                f"RTU CRC mismatch (unit=0x{head[0]:02X} fc=0x{fc:02X} "
+                f"calc=0x{calc:04X} got=0x{got:04X}) frame={frame.hex()}"
+                + (f" +{len(extra)}B waiting: {extra.hex()}" if extra else ""))
         return frame[1:-2]  # strip unit + CRC
 
     def read(self, fc: int, addr: int, count: int) -> list:

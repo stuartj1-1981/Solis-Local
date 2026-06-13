@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.3 — 2026-06-13
+
+### Diagnostics
+- **`RTU CRC mismatch` now logs the raw frame.** The error includes the unit/fc, the
+  computed vs received CRC, the assembled frame bytes, and any bytes still waiting in the
+  socket buffer. This pinpoints gateway framing quirks (a leading byte, a stripped/extra
+  CRC, or a length mismatch) without needing a packet capture.
+
 ## 1.0.2 — 2026-06-13
 
 ### Fixed
