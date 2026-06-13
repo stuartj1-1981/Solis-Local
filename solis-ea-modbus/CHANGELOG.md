@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.1 — 2026-06-13
+
+### Fixed
+- **Poll loop no longer crashes on a malformed Modbus reply.** A short/odd-length or
+  misframed response (e.g. a transparent gateway polled in pure-`tcp` mode) raised an
+  uncaught `struct.error` that aborted every poll cycle. `read()` now validates the
+  function-code echo and byte count, raising `ModbusError` so the per-register fallback
+  handles it gracefully and the loop survives.
+- Block-read failures now log the **raw response frame (hex)**, making protocol/unit-id
+  mismatches diagnosable. If you see these warnings, try switching `protocol` to
+  `rtu_over_tcp` (or set the Waveshare gateway to "Modbus TCP to RTU" mode).
+
 ## 1.0.0 — 2026-06-13
 
 Initial release. Active Modbus master for the Solis S6-EA hybrid inverter via a Waveshare

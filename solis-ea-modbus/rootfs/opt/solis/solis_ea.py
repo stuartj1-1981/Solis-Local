@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover
     HAS_MQTT = False
     logging.warning("paho-mqtt not installed — MQTT publishing disabled")
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 # =============================================================================
 # Defaults (overridden by environment variables from the S6 run script)
@@ -291,9 +291,23 @@ class SolisModbus:
     def read(self, fc: int, addr: int, count: int) -> list:
         pdu = struct.pack(">BHH", fc, addr, count)
         resp = self._txn(pdu)
+        # Validate framing before unpacking. A short/odd/misframed reply (e.g. a
+        # transparent gateway being polled in pure-TCP mode) must surface as a
+        # ModbusError so _read_block's fallback handles it — never a struct.error
+        # that would abort the whole poll loop. The raw frame is logged to aid
+        # diagnosis (wrong `protocol`, wrong unit id, etc.).
+        if len(resp) < 2:
+            raise ModbusError(f"fc 0x{fc:02X} addr {addr}: truncated reply "
+                              f"({len(resp)} bytes): {resp.hex()}")
+        if resp[0] != fc:
+            raise ModbusError(f"fc 0x{fc:02X} addr {addr}: unexpected fc 0x{resp[0]:02X} "
+                              f"in reply (check `protocol`/unit): {resp.hex()}")
         bc = resp[1]
         data = resp[2:2 + bc]
-        return [struct.unpack(">H", data[i:i + 2])[0] for i in range(0, len(data), 2)]
+        if bc % 2 or len(data) != bc:
+            raise ModbusError(f"fc 0x{fc:02X} addr {addr}: bad byte count "
+                              f"(declared {bc}, got {len(data)}): {resp.hex()}")
+        return [struct.unpack(">H", data[i:i + 2])[0] for i in range(0, bc, 2)]
 
     def read_input(self, addr: int, count: int) -> list:
         return self.read(0x04, addr, count)
