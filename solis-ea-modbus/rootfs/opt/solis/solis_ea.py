@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover
     HAS_MQTT = False
     logging.warning("paho-mqtt not installed — MQTT publishing disabled")
 
-VERSION = "1.0.7"
+VERSION = "1.0.8"
 
 # =============================================================================
 # Defaults (overridden by environment variables from the S6 run script)
@@ -102,12 +102,21 @@ TELEMETRY = [
 # are split into chunks of this size. Raise it if your gateway tolerates larger frames.
 MAX_REGS_PER_READ = 2
 
-# Telemetry block reads (FC04). Each: (start, count). Kept <= 50 registers.
+# Telemetry block reads (FC04). Each: (start, count). Targeted to the registers we
+# actually decode, in <= MAX_REGS_PER_READ groups that never split a 32-bit (words=2)
+# pair. Reading the low word of a u32/s32 on its own (e.g. 33150) hangs this inverter,
+# so each 2-word value gets its own aligned block. Fewer reads also = faster cycle.
 TELEMETRY_BLOCKS = [
     (33035, 1),    # energy_today
-    (33057, 2),    # pv_power
-    (33073, 22),   # ac_voltage, inverter_ac_power, inverter_temperature, grid_frequency
-    (33130, 21),   # grid_power, battery cluster (current/flag/soc/soh/voltage/power)
+    (33057, 2),    # pv_power (u32)
+    (33073, 1),    # ac_voltage
+    (33079, 2),    # inverter_ac_power (s32)
+    (33093, 2),    # inverter_temperature, grid_frequency
+    (33130, 2),    # grid_power (s32)
+    (33134, 2),    # battery_current, battery flag (33135)
+    (33139, 2),    # battery_soc, battery_soh
+    (33141, 1),    # battery_voltage
+    (33149, 2),    # battery_power (s32)
 ]
 
 # Battery charge/discharge flag (FC04) — published as a text sensor.

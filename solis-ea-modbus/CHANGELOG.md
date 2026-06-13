@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.8 — 2026-06-13
+
+### Fixed
+- **Stop splitting 32-bit register pairs (the `33150` timeout).** The wide telemetry blocks
+  were chunked into 2-register reads, which split the `battery_power` u32 (`33149`/`33150`)
+  and left `33150` read on its own — the inverter won't return a 32-bit low word in
+  isolation, so it hung and timed out every cycle. Telemetry blocks are now targeted to the
+  exact registers decoded, each 32-bit value kept in one aligned block. Also cuts the cycle
+  from ~30 reads to ~10 (faster, and a smaller window for cloud-dongle bus collisions).
+
 ## 1.0.7 — 2026-06-13
 
 ### Fixed
