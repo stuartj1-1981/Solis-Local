@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.12 — 2026-06-14
+
+### Added
+- **Whole-home meter/CT telemetry for Predbat's load model.** Four new read-only
+  sensors so Predbat no longer needs external energy sensors:
+  `House Load` (33147, W), `Grid Import Today` (33171), `Grid Export Today`
+  (33175) and `House Load Today` (33179) — the Today counters are U16 ×0.1 kWh,
+  `total_increasing`. PV generation already came through as `Energy Today`
+  (33035). Each is a single-register read within the existing
+  `MAX_REGS_PER_READ` limit. **Run `--probe` to confirm the registers populate
+  and the Today values are U16 (not U32) on your firmware before relying on them.**
+
 ## 1.0.11 — 2026-06-14
 
 ### Fixed

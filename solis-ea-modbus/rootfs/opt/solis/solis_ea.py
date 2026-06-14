@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover
     HAS_MQTT = False
     logging.warning("paho-mqtt not installed — MQTT publishing disabled")
 
-VERSION = "1.0.11"
+VERSION = "1.0.12"
 
 # =============================================================================
 # Defaults (overridden by environment variables from the S6 run script)
@@ -94,6 +94,14 @@ TELEMETRY = [
     {"oid": "grid_frequency",       "addr": 33094, "words": 1, "signed": False, "scale": 0.01, "unit": "Hz",  "dclass": "frequency",   "sclass": "measurement", "name": "Grid Frequency"},
     {"oid": "energy_today",         "addr": 33035, "words": 1, "signed": False, "scale": 0.1,  "unit": "kWh", "dclass": "energy",      "sclass": "total_increasing", "name": "Energy Today"},
     {"oid": "inverter_temperature", "addr": 33093, "words": 1, "signed": True,  "scale": 0.1,  "unit": "°C",  "dclass": "temperature", "sclass": "measurement", "name": "Inverter Temperature"},
+    # --- Meter / CT-derived (whole-home, for the Predbat load model) ---------
+    # Single-register U16 on the verified Solis map (wills106 plugin_solis).
+    # The Total counterparts (33169/33173/33177) are U32; the Today ones are U16
+    # x0.1 kWh. Run --probe on your unit to confirm before relying on them.
+    {"oid": "house_load",           "addr": 33147, "words": 1, "signed": False, "scale": 1,    "unit": "W",   "dclass": "power",       "sclass": "measurement",      "name": "House Load"},
+    {"oid": "grid_import_today",    "addr": 33171, "words": 1, "signed": False, "scale": 0.1,  "unit": "kWh", "dclass": "energy",      "sclass": "total_increasing", "name": "Grid Import Today", "icon": "mdi:transmission-tower-import"},
+    {"oid": "grid_export_today",    "addr": 33175, "words": 1, "signed": False, "scale": 0.1,  "unit": "kWh", "dclass": "energy",      "sclass": "total_increasing", "name": "Grid Export Today", "icon": "mdi:transmission-tower-export"},
+    {"oid": "house_load_today",     "addr": 33179, "words": 1, "signed": False, "scale": 0.1,  "unit": "kWh", "dclass": "energy",      "sclass": "total_increasing", "name": "House Load Today", "icon": "mdi:home-lightning-bolt"},
 ]
 
 # Max registers per Modbus read. This gateway is picky about read size: large reads
@@ -116,7 +124,11 @@ TELEMETRY_BLOCKS = [
     (33134, 2),    # battery_current, battery flag (33135)
     (33139, 2),    # battery_soc, battery_soh
     (33141, 1),    # battery_voltage
+    (33147, 1),    # house_load (meter CT)
     (33149, 2),    # battery_power (s32)
+    (33171, 1),    # grid_import_today (meter CT)
+    (33175, 1),    # grid_export_today (meter CT)
+    (33179, 1),    # house_load_today (meter CT)
 ]
 
 # Battery charge/discharge flag (FC04) — published as a text sensor.
