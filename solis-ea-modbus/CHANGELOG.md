@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.10 — 2026-06-14
+
+### Fixed
+- **Charge/discharge current scaling (10× too low).** These registers are in 0.1 A units,
+  but the value was written raw — so a 105 A setpoint commanded only 10.5 A. Added
+  `read_scale`/`write_div` of `0.1` to both `charge_current` and `discharge_current`, so
+  105 A now writes 1050 (= 105.0 A) and reads back correctly. Number states are rounded to
+  1 dp to avoid float noise. **Re-test at a low setpoint first to confirm before relying on
+  it for control.**
+
 ## 1.0.9 — 2026-06-13
 
 ### Added

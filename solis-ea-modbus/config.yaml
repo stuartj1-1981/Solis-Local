@@ -1,6 +1,6 @@
 name: "Solis EA Modbus Control"
 description: "Active Modbus master for the Solis S6-EA hybrid inverter via a Waveshare RS485 gateway. Polls telemetry and exposes Predbat-ready, safety-clamped control entities over MQTT auto-discovery."
-version: "1.0.9"
+version: "1.0.10"
 slug: "solis_ea_modbus"
 url: "https://github.com/stuartj1-1981/Solis-Local"
 arch:

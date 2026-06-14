@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover
     HAS_MQTT = False
     logging.warning("paho-mqtt not installed — MQTT publishing disabled")
 
-VERSION = "1.0.9"
+VERSION = "1.0.10"
 
 # =============================================================================
 # Defaults (overridden by environment variables from the S6 run script)
@@ -137,10 +137,10 @@ CONTROL = [
      "read_scale": 100, "write_div": 100, "icon": "mdi:transmission-tower-export"},
     {"oid": "charge_current", "comp": "number", "addr": 43141, "name": "Charge Current Limit",
      "min": 0, "max_cfg": "max_current_a", "step": 1, "unit": "A", "dclass": "current",
-     "icon": "mdi:current-dc"},
+     "read_scale": 0.1, "write_div": 0.1, "icon": "mdi:current-dc"},
     {"oid": "discharge_current", "comp": "number", "addr": 43142, "name": "Discharge Current Limit",
      "min": 0, "max_cfg": "max_current_a", "step": 1, "unit": "A", "dclass": "current",
-     "icon": "mdi:current-dc"},
+     "read_scale": 0.1, "write_div": 0.1, "icon": "mdi:current-dc"},
     {"oid": "charge_start", "comp": "text", "addr_h": 43143, "addr_m": 43144, "name": "Charge Start (slot 1)"},
     {"oid": "charge_end", "comp": "text", "addr_h": 43145, "addr_m": 43146, "name": "Charge End (slot 1)"},
     {"oid": "discharge_start", "comp": "text", "addr_h": 43147, "addr_m": 43148, "name": "Discharge Start (slot 1)"},
@@ -678,7 +678,7 @@ class SolisController:
             elif c["comp"] == "number":
                 raw = regs.get(c["addr"])
                 if raw is not None:
-                    val = raw * c.get("read_scale", 1)
+                    val = round(raw * c.get("read_scale", 1), 1)
                     self.mqtt.publish(f"{base}/{oid}/state", str(val))
             elif c["comp"] == "text":
                 h, m = regs.get(c["addr_h"]), regs.get(c["addr_m"])
@@ -785,7 +785,8 @@ class SolisController:
                     if raw in rev:
                         self.mqtt.publish(f"{base}/{oid}/state", rev[raw])
                 elif comp == "number":
-                    self.mqtt.publish(f"{base}/{oid}/state", str(raw * spec.get("read_scale", 1)))
+                    self.mqtt.publish(f"{base}/{oid}/state",
+                                      str(round(raw * spec.get("read_scale", 1), 1)))
                 else:
                     self.mqtt.publish(f"{base}/{oid}/state", str(raw))
             elif comp == "text":
