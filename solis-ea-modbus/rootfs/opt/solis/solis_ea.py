@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover
     HAS_MQTT = False
     logging.warning("paho-mqtt not installed — MQTT publishing disabled")
 
-VERSION = "1.0.10"
+VERSION = "1.0.11"
 
 # =============================================================================
 # Defaults (overridden by environment variables from the S6 run script)
@@ -84,7 +84,7 @@ DEFAULT_CONFIG = {
 TELEMETRY = [
     {"oid": "battery_soc",          "addr": 33139, "words": 1, "signed": False, "scale": 1,    "unit": "%",   "dclass": "battery",     "sclass": "measurement", "name": "Battery SOC"},
     {"oid": "battery_soh",          "addr": 33140, "words": 1, "signed": False, "scale": 1,    "unit": "%",   "dclass": None,          "sclass": "measurement", "name": "Battery SOH", "icon": "mdi:battery-heart-variant"},
-    {"oid": "battery_voltage",      "addr": 33141, "words": 1, "signed": False, "scale": 0.1,  "unit": "V",   "dclass": "voltage",     "sclass": "measurement", "name": "Battery Voltage (BMS)"},
+    {"oid": "battery_voltage",      "addr": 33141, "words": 1, "signed": False, "scale": 0.01, "unit": "V",   "dclass": "voltage",     "sclass": "measurement", "name": "Battery Voltage (BMS)"},
     {"oid": "battery_current",      "addr": 33134, "words": 1, "signed": True,  "scale": 0.1,  "unit": "A",   "dclass": "current",     "sclass": "measurement", "name": "Battery Current"},
     {"oid": "battery_power",        "addr": 33149, "words": 2, "signed": True,  "scale": 1,    "unit": "W",   "dclass": "power",       "sclass": "measurement", "name": "Battery Power"},
     {"oid": "pv_power",             "addr": 33057, "words": 2, "signed": False, "scale": 1,    "unit": "W",   "dclass": "power",       "sclass": "measurement", "name": "PV DC Power"},

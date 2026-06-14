@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.11 — 2026-06-14
+
+### Fixed
+- **Battery Voltage (BMS) scaling.** This inverter reports BMS voltage in 0.01 V units, so
+  the previous `scale: 0.1` showed 531 V instead of 53.1 V. Corrected to `0.01`.
+
 ## 1.0.10 — 2026-06-14
 
 ### Fixed
