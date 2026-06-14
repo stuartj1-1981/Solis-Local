@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.13 — 2026-06-14
+
+### Changed
+- **Removed `PV DC Power` (33057).** The S6-EA is AC-coupled — no DC PV input — so this
+  register was always 0. Live PV power should come from the PV inverter's own integration
+  (e.g. Enphase). The retained MQTT discovery config is cleared on upgrade, so the orphaned
+  entity disappears from HA automatically.
+- **Renamed `Energy Today` → `PV Generation Today`.** Register 33035 is the EA's
+  CT-measured PV generation today and matches the PV inverter's figure (verified against
+  Enphase), so the name now reflects that. Friendly name only — the entity ID and history
+  are unchanged.
+
 ## 1.0.12 — 2026-06-14
 
 ### Added

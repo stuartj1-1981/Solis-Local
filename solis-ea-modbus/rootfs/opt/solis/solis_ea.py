@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover
     HAS_MQTT = False
     logging.warning("paho-mqtt not installed — MQTT publishing disabled")
 
-VERSION = "1.0.12"
+VERSION = "1.0.13"
 
 # =============================================================================
 # Defaults (overridden by environment variables from the S6 run script)
@@ -87,12 +87,11 @@ TELEMETRY = [
     {"oid": "battery_voltage",      "addr": 33141, "words": 1, "signed": False, "scale": 0.01, "unit": "V",   "dclass": "voltage",     "sclass": "measurement", "name": "Battery Voltage (BMS)"},
     {"oid": "battery_current",      "addr": 33134, "words": 1, "signed": True,  "scale": 0.1,  "unit": "A",   "dclass": "current",     "sclass": "measurement", "name": "Battery Current"},
     {"oid": "battery_power",        "addr": 33149, "words": 2, "signed": True,  "scale": 1,    "unit": "W",   "dclass": "power",       "sclass": "measurement", "name": "Battery Power"},
-    {"oid": "pv_power",             "addr": 33057, "words": 2, "signed": False, "scale": 1,    "unit": "W",   "dclass": "power",       "sclass": "measurement", "name": "PV DC Power"},
     {"oid": "inverter_ac_power",    "addr": 33079, "words": 2, "signed": True,  "scale": 1,    "unit": "W",   "dclass": "power",       "sclass": "measurement", "name": "Inverter AC Power"},
     {"oid": "grid_power",           "addr": 33130, "words": 2, "signed": True,  "scale": 1,    "unit": "W",   "dclass": "power",       "sclass": "measurement", "name": "Grid Power"},
     {"oid": "ac_voltage",          "addr": 33073, "words": 1, "signed": False, "scale": 0.1,  "unit": "V",   "dclass": "voltage",     "sclass": "measurement", "name": "AC Voltage"},
     {"oid": "grid_frequency",       "addr": 33094, "words": 1, "signed": False, "scale": 0.01, "unit": "Hz",  "dclass": "frequency",   "sclass": "measurement", "name": "Grid Frequency"},
-    {"oid": "energy_today",         "addr": 33035, "words": 1, "signed": False, "scale": 0.1,  "unit": "kWh", "dclass": "energy",      "sclass": "total_increasing", "name": "Energy Today"},
+    {"oid": "energy_today",         "addr": 33035, "words": 1, "signed": False, "scale": 0.1,  "unit": "kWh", "dclass": "energy",      "sclass": "total_increasing", "name": "PV Generation Today"},
     {"oid": "inverter_temperature", "addr": 33093, "words": 1, "signed": True,  "scale": 0.1,  "unit": "°C",  "dclass": "temperature", "sclass": "measurement", "name": "Inverter Temperature"},
     # --- Meter / CT-derived (whole-home, for the Predbat load model) ---------
     # Single-register U16 on the verified Solis map (wills106 plugin_solis).
@@ -115,8 +114,7 @@ MAX_REGS_PER_READ = 2
 # pair. Reading the low word of a u32/s32 on its own (e.g. 33150) hangs this inverter,
 # so each 2-word value gets its own aligned block. Fewer reads also = faster cycle.
 TELEMETRY_BLOCKS = [
-    (33035, 1),    # energy_today
-    (33057, 2),    # pv_power (u32)
+    (33035, 1),    # energy_today (PV generation, AC-coupled via CT)
     (33073, 1),    # ac_voltage
     (33079, 2),    # inverter_ac_power (s32)
     (33093, 2),    # inverter_temperature, grid_frequency
@@ -133,6 +131,14 @@ TELEMETRY_BLOCKS = [
 
 # Battery charge/discharge flag (FC04) — published as a text sensor.
 BATTERY_FLAG_ADDR = 33135
+
+# Discovery topics for sensors removed in past versions. send_all_discovery() clears
+# the retained config (empty payload) so HA drops the orphaned entity automatically.
+#   pv_power — removed in 1.0.13: the S6-EA is AC-coupled (no DC PV input), so PV DC
+#   Power was always 0. Live PV comes from the PV inverter's own integration (e.g. Enphase).
+RETIRED_DISCOVERY_TOPICS = [
+    "homeassistant/sensor/solis_ea/pv_power/config",
+]
 
 # Control holding registers (FC03 read / FC06 write).
 # Legacy Time-Charging scheme. component drives the HA entity type.
@@ -499,6 +505,9 @@ class MQTTPublisher:
 
     # ---- discovery -----------------------------------------------------------
     def send_all_discovery(self):
+        # Clear retained config for sensors removed in past versions so HA drops them.
+        for topic in RETIRED_DISCOVERY_TOPICS:
+            self.publish(topic, "")
         self._disc_gateway_status()
         for s in TELEMETRY:
             self._disc_sensor(s["oid"], s["name"], unit=s.get("unit"),
