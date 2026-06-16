@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.0.14 — 2026-06-16
+
+### Fixed
+- Reserve SOC now controls the self-use discharge floor (reg 43011 Overdischarge SOC), not the
+  Backup Mode SOC (reg 43024). 43024 is inert in Self-Use mode, so writes were ignored and it
+  held its factory default 80 — Predbat could never lower the reserve. oid unchanged, so the HA
+  entity_id and Predbat reserve: wiring keep working.
+
+### Added
+- Backup SOC (diagnostic) sensor (reg 43024, read-only).
+
 ## 1.0.13 — 2026-06-14
 
 ### Changed

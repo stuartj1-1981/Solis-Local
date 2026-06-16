@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover
     HAS_MQTT = False
     logging.warning("paho-mqtt not installed — MQTT publishing disabled")
 
-VERSION = "1.0.13"
+VERSION = "1.0.14"
 
 # =============================================================================
 # Defaults (overridden by environment variables from the S6 run script)
@@ -148,8 +148,17 @@ CONTROL = [
      "icon": "mdi:home-lightning-bolt"},
     {"oid": "work_mode_raw", "comp": "sensor", "addr": 43110, "name": "Work Mode (raw)",
      "icon": "mdi:cog", "ecat": "diagnostic"},
-    {"oid": "reserve_soc", "comp": "number", "addr": 43024, "name": "Reserve SOC (Backup)",
+    # Predbat-controlled discharge floor = self-use "Overdischarge SOC" (reg 43011): the SOC at
+    # which the inverter stops discharging in normal grid-tied operation. The old map used reg 43024
+    # = "Backup Mode SOC", inert unless Reserve/Backup mode (bit 4 of work-mode reg 43110) is on, so
+    # writes were echoed but ignored and it sat at its factory default 80. oid kept as "reserve_soc"
+    # so the HA entity_id and the Predbat `reserve:` wiring are unchanged.
+    {"oid": "reserve_soc", "comp": "number", "addr": 43011, "name": "Reserve SOC (Overdischarge)",
      "min": 0, "max": 100, "step": 1, "unit": "%", "icon": "mdi:battery-lock", "clamp": (0, 100)},
+    # Read-only diagnostic: Backup Mode SOC (reg 43024). Only takes effect in Reserve/Backup mode.
+    {"oid": "backup_soc", "comp": "sensor", "addr": 43024, "name": "Backup SOC (diagnostic)",
+     "unit": "%", "dclass": "battery", "sclass": "measurement", "icon": "mdi:battery-lock",
+     "ecat": "diagnostic"},
     {"oid": "export_limit", "comp": "number", "addr": 43074, "name": "Export Power Limit",
      "min": 0, "max_cfg": "export_limit_w", "step": 100, "unit": "W", "dclass": "power",
      "read_scale": 100, "write_div": 100, "icon": "mdi:transmission-tower-export"},
@@ -169,7 +178,8 @@ CONTROL = [
 
 # Control block reads (FC03).
 CONTROL_BLOCKS = [
-    (43024, 1),    # reserve_soc
+    (43011, 1),    # reserve_soc -> Overdischarge SOC (self-use discharge floor, writable)
+    (43024, 1),    # backup_soc  -> Backup Mode SOC (read-only diagnostic)
     (43074, 1),    # export_limit
     (43110, 1),    # work_mode
     (43141, 10),   # currents + all four slot edges (43141..43150)
@@ -555,7 +565,8 @@ class MQTTPublisher:
     def _disc_control(self, c):
         oid, comp = c["oid"], c["comp"]
         if comp == "sensor":
-            self._disc_sensor(oid, c["name"], icon=c.get("icon"), ecat=c.get("ecat"))
+            self._disc_sensor(oid, c["name"], unit=c.get("unit"), dclass=c.get("dclass"),
+                              sclass=c.get("sclass"), icon=c.get("icon"), ecat=c.get("ecat"))
             return
         base_payload = {
             "name": c["name"],
