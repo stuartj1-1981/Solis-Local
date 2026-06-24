@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover
     HAS_MQTT = False
     logging.warning("paho-mqtt not installed — MQTT publishing disabled")
 
-VERSION = "1.0.14"
+VERSION = "1.0.15"
 
 # =============================================================================
 # Defaults (overridden by environment variables from the S6 run script)
@@ -361,8 +361,17 @@ class SolisModbus:
             self._last_txn = time.monotonic()
 
         if resp and (resp[0] & 0x80):
+            req_fc = pdu[0]
+            resp_fc = resp[0] & 0x7F
             code = resp[1] if len(resp) > 1 else 0
-            raise ModbusError(f"exception 0x{code:02X} for fc 0x{resp[0] & 0x7F:02X}")
+            if resp_fc == req_fc:
+                raise ModbusError(f"exception 0x{code:02X} for fc 0x{req_fc:02X}")
+            # The reply's function code doesn't match what we sent: this is a framing
+            # desync (the gateway handed us a stale/garbage frame), NOT a real inverter
+            # exception. We only ever issue FC03/04/06, so a reply for fc 0x01/0x02 is
+            # always junk — label it honestly instead of "exception for fc 0x02".
+            raise ModbusError(f"frame desync: sent fc 0x{req_fc:02X}, got reply for "
+                              f"fc 0x{resp_fc:02X} (check `protocol`/unit): {resp.hex()}")
         return resp
 
     def _recv_rtu(self) -> bytes:
@@ -404,8 +413,8 @@ class SolisModbus:
             raise ModbusError(f"fc 0x{fc:02X} addr {addr}: truncated reply "
                               f"({len(resp)} bytes): {resp.hex()}")
         if resp[0] != fc:
-            raise ModbusError(f"fc 0x{fc:02X} addr {addr}: unexpected fc 0x{resp[0]:02X} "
-                              f"in reply (check `protocol`/unit): {resp.hex()}")
+            raise ModbusError(f"frame desync at addr {addr}: sent fc 0x{fc:02X}, got fc "
+                              f"0x{resp[0]:02X} in reply (check `protocol`/unit): {resp.hex()}")
         bc = resp[1]
         data = resp[2:2 + bc]
         if bc % 2 or len(data) != bc:
@@ -622,6 +631,9 @@ class SolisController:
         self.mqtt = MQTTPublisher(config, self.cmd_queue)
         self.control_enabled = bool(config["enable_control"])  # runtime interlock
         self.discovery_sent = False
+        # Last-known raw holding-register values, refreshed every control poll. Used to
+        # skip a write when the register already holds the target value (write suppression).
+        self._reg_cache: dict = {}
 
     # ---- connection with exponential backoff --------------------------------
     def _connect_bus(self) -> bool:
@@ -640,29 +652,57 @@ class SolisController:
     # ---- block reads with chunking + per-address fallback -------------------
     def _read_block(self, fc: int, start: int, count: int) -> dict:
         """Read `count` registers from `start`, split into <= MAX_REGS_PER_READ chunks
-        so a gateway that caps its response size doesn't truncate. A chunk that still
-        fails (CRC/exception/short frame) drops to a per-register fallback, leaving gaps
-        for registers the inverter doesn't expose rather than failing the whole block."""
+        so a gateway that caps its response size doesn't truncate. Each chunk gets one
+        inline retry for a transient desync; a chunk that still fails drops to a
+        per-register fallback. The fallback's outcome decides the log level: DEBUG if
+        every register was recovered (a transient we papered over), WARNING only when
+        specific registers returned no data (real loss). A socket break (ConnectionError)
+        is not caught here — it propagates to trigger a reconnect."""
         out = {}
         for off in range(0, count, MAX_REGS_PER_READ):
             sub_start = start + off
             sub_count = min(MAX_REGS_PER_READ, count - off)
+            regs, err = self._read_chunk(fc, sub_start, sub_count)
+            if regs is not None:
+                out.update({sub_start + i: regs[i] for i in range(len(regs))})
+                continue
+            # Chunk failed twice — fall back to single-register reads and note which
+            # addresses still don't answer.
+            lost = []
+            for a in range(sub_start, sub_start + sub_count):
+                try:
+                    out[a] = self.modbus.read(fc, a, 1)[0]
+                except (ModbusError, TimeoutError):
+                    lost.append(a)  # leave gap; keep last published value
+            if lost:
+                logging.warning("Block read fc%d %d+%d failed (%s) — no data for reg(s) %s",
+                                fc, sub_start, sub_count, err,
+                                ",".join(str(a) for a in lost))
+            else:
+                logging.debug("Block read fc%d %d+%d failed (%s) — recovered via per-register",
+                              fc, sub_start, sub_count, err)
+        return out
+
+    def _read_chunk(self, fc: int, sub_start: int, sub_count: int):
+        """Read one chunk, retrying once on a Modbus desync/exception. The retry's
+        transaction re-drains the socket first, which clears most transient framing
+        errors on this gateway. Returns (registers, None) on success or
+        (None, last_error) if both attempts failed. ConnectionError is deliberately not
+        caught — a dropped socket must reach the reconnect path."""
+        last_err = None
+        for attempt in (1, 2):
             try:
                 regs = self.modbus.read(fc, sub_start, sub_count)
-                out.update({sub_start + i: regs[i] for i in range(len(regs))})
-            except (ModbusError, TimeoutError) as e:
-                # A single unanswered read (no-reply timeout, CRC, or exception) must not
-                # abort the whole cycle — skip it, leave a gap, and carry on. The next
-                # request re-drains, so a late reply can't desync us. Only a real socket
-                # break (ConnectionError) propagates to trigger a reconnect.
-                logging.warning("Block read fc%d %d+%d failed (%s) — per-register fallback",
-                                fc, sub_start, sub_count, e)
-                for a in range(sub_start, sub_start + sub_count):
-                    try:
-                        out[a] = self.modbus.read(fc, a, 1)[0]
-                    except (ModbusError, TimeoutError):
-                        pass  # leave gap; keep last published value
-        return out
+                if attempt == 2:
+                    logging.debug("Block read fc%d %d+%d recovered on retry",
+                                  fc, sub_start, sub_count)
+                return regs, None
+            except ModbusError as e:
+                last_err = e  # transient desync/exception — retry once
+            except TimeoutError as e:
+                last_err = e
+                break  # silent bus; don't double the stall, go straight to fallback
+        return None, last_err
 
     # ---- telemetry ----------------------------------------------------------
     def _poll_telemetry(self):
@@ -692,6 +732,9 @@ class SolisController:
         regs = {}
         for start, count in CONTROL_BLOCKS:
             regs.update(self._read_block(0x03, start, count))
+        # Refresh the write-suppression cache from the live registers so a stale entry
+        # self-heals each cycle and an external change is picked up within one poll.
+        self._reg_cache.update(regs)
         base = self.config["mqtt_base_topic"]
         for c in CONTROL:
             oid = c["oid"]
@@ -722,15 +765,25 @@ class SolisController:
 
     # ---- command handling (runs on the main/bus thread) ---------------------
     def _drain_commands(self):
+        # Pull every queued command and keep only the LAST value per oid, so a burst of
+        # duplicate setpoints (e.g. Predbat re-sending discharge_current 0->90 several
+        # times a slot) collapses into one write instead of 2-3 round-trips on the shared
+        # RS485 bus. First-seen order is preserved across distinct entities.
+        latest = {}
+        order = []
         while True:
             try:
                 oid, payload = self.cmd_queue.get_nowait()
             except queue.Empty:
-                return
+                break
+            if oid not in latest:
+                order.append(oid)
+            latest[oid] = payload
+        for oid in order:
             try:
-                self._handle_command(oid, payload)
+                self._handle_command(oid, latest[oid])
             except Exception as e:
-                logging.error("Command %s=%r failed: %s", oid, payload, e)
+                logging.error("Command %s=%r failed: %s", oid, latest[oid], e)
 
     def _spec(self, oid):
         for c in CONTROL:
@@ -746,7 +799,12 @@ class SolisController:
             self.control_enabled = (payload.upper() == "ON")
             self.mqtt.publish(f"{base}/control_enable/state",
                               "ON" if self.control_enabled else "OFF")
-            logging.warning("Control interlock %s", "ENABLED" if self.control_enabled else "DISABLED")
+            # DISABLED is a safety-relevant hard-stop (stays WARNING); ENABLED is the
+            # benign normal state and was the source of repeated overnight WARNING noise.
+            if self.control_enabled:
+                logging.info("Control interlock ENABLED")
+            else:
+                logging.warning("Control interlock DISABLED — all writes blocked")
             return
 
         spec = self._spec(oid)
@@ -766,7 +824,12 @@ class SolisController:
                 logging.warning("Invalid work_mode option: %r", payload)
                 self._publish_actual(spec)
                 return
-            self._write_verify(spec, [(spec["addr"], spec["options"][payload])])
+            reg_val = spec["options"][payload]
+            if self._reg_cache.get(spec["addr"]) == reg_val:
+                logging.debug("Skip %s write: register already %d", oid, reg_val)
+                self._publish_from_values(spec, [(spec["addr"], reg_val)])
+                return
+            self._write_verify(spec, [(spec["addr"], reg_val)])
 
         elif comp == "number":
             try:
@@ -778,9 +841,13 @@ class SolisController:
             lo = spec["min"]
             hi = self.config[spec["max_cfg"]] if "max_cfg" in spec else spec["max"]
             clamped = max(lo, min(hi, req))
+            reg_val = int(round(clamped / spec.get("write_div", 1)))
+            if self._reg_cache.get(spec["addr"]) == reg_val:
+                logging.debug("Skip %s write: register already %d", oid, reg_val)
+                self._publish_from_values(spec, [(spec["addr"], reg_val)])
+                return
             if clamped != req:
                 logging.warning("CLAMPED %s: %s -> %s [%s..%s]", oid, req, clamped, lo, hi)
-            reg_val = int(round(clamped / spec.get("write_div", 1)))
             self._write_verify(spec, [(spec["addr"], reg_val)])
 
         elif comp == "text":
@@ -793,17 +860,51 @@ class SolisController:
                 logging.warning("Invalid time for %s: %r (need HH:MM)", oid, payload)
                 self._publish_actual(spec)
                 return
+            if (self._reg_cache.get(spec["addr_h"]) == hh
+                    and self._reg_cache.get(spec["addr_m"]) == mm):
+                logging.debug("Skip %s write: register already %02d:%02d", oid, hh, mm)
+                self._publish_from_values(spec, [(spec["addr_h"], hh), (spec["addr_m"], mm)])
+                return
             self._write_verify(spec, [(spec["addr_h"], hh), (spec["addr_m"], mm)])
 
     def _write_verify(self, spec, writes):
-        """Perform clamped writes (already validated), then publish the true state."""
+        """Perform clamped writes (already validated). write_single already reads each
+        register back to confirm, so on success we publish the confirmed values directly
+        and refresh the cache — no extra bus read. Only re-read from the inverter if a
+        write failed, to publish the real state."""
         ok = True
         for addr, val in writes:
             if not self.modbus.write_single(addr, val):
                 ok = False
         if ok:
             logging.info("Wrote %s: %s", spec["oid"], writes)
-        self._publish_actual(spec)
+            for addr, val in writes:
+                self._reg_cache[addr] = val
+            self._publish_from_values(spec, writes)
+        else:
+            self._publish_actual(spec)
+
+    def _publish_from_values(self, spec, writes):
+        """Publish a control's MQTT state from just-written/confirmed register values,
+        avoiding a redundant bus read. `writes` is the [(addr, raw)] list passed to
+        _write_verify."""
+        base = self.config["mqtt_base_topic"]
+        oid, comp = spec["oid"], spec["comp"]
+        vals = {addr: val for addr, val in writes}
+        if comp == "select":
+            raw = vals.get(spec["addr"])
+            rev = {v: k for k, v in spec["options"].items()}
+            if raw in rev:
+                self.mqtt.publish(f"{base}/{oid}/state", rev[raw])
+        elif comp == "number":
+            raw = vals.get(spec["addr"])
+            if raw is not None:
+                self.mqtt.publish(f"{base}/{oid}/state",
+                                  str(round(raw * spec.get("read_scale", 1), 1)))
+        elif comp == "text":
+            h, m = vals.get(spec["addr_h"]), vals.get(spec["addr_m"])
+            if h is not None and m is not None:
+                self.mqtt.publish(f"{base}/{oid}/state", f"{h:02d}:{m:02d}")
 
     def _publish_actual(self, spec):
         """Re-read the register(s) for one control and publish the real value."""
@@ -926,6 +1027,58 @@ class SolisController:
         print()
         self.modbus.close()
 
+    # ---- read-only transport soak test --------------------------------------
+    def soak(self, cycles: int):
+        """Read-only diagnostic: hammer the real read map for `cycles` passes and tally
+        the outcome of every chunk read, so transport quality can be compared empirically
+        (e.g. run once with `--protocol tcp` and once with `--protocol rtu_over_tcp`).
+        Makes no writes and publishes nothing."""
+        try:
+            self.modbus.connect()
+        except OSError as e:
+            print(f"Soak: cannot connect to {self.config['gateway_host']}:"
+                  f"{self.config['gateway_port']} — {e}")
+            return
+        blocks = ([(0x04, s, c) for s, c in TELEMETRY_BLOCKS]
+                  + [(0x03, s, c) for s, c in CONTROL_BLOCKS])
+        tally = {"ok": 0, "desync": 0, "exception": 0, "timeout": 0,
+                 "framing": 0, "reconnect": 0}
+        print(f"\nSoak — {self.config['gateway_host']}:{self.config['gateway_port']} "
+              f"({self.config['protocol']}) unit {self.config['slave_address']}, "
+              f"{cycles} cycles\n")
+        for i in range(cycles):
+            for fc, start, count in blocks:
+                for off in range(0, count, MAX_REGS_PER_READ):
+                    ss = start + off
+                    sc = min(MAX_REGS_PER_READ, count - off)
+                    try:
+                        self.modbus.read(fc, ss, sc)
+                        tally["ok"] += 1
+                    except TimeoutError:
+                        tally["timeout"] += 1
+                    except ConnectionError:
+                        tally["reconnect"] += 1
+                        try:
+                            self.modbus.connect()
+                        except OSError:
+                            pass
+                    except ModbusError as e:
+                        msg = str(e)
+                        if "desync" in msg:
+                            tally["desync"] += 1
+                        elif "exception 0x" in msg:
+                            tally["exception"] += 1
+                        else:
+                            tally["framing"] += 1
+            print(f"  cycle {i + 1}/{cycles}", end="\r")
+        print()
+        total = sum(tally.values()) or 1
+        print(f"\nResult ({sum(tally.values())} chunk reads):")
+        for k in ("ok", "desync", "exception", "timeout", "framing", "reconnect"):
+            print(f"  {k:<10} {tally[k]:6d}  ({100 * tally[k] / total:5.1f}%)")
+        print()
+        self.modbus.close()
+
 
 # =============================================================================
 # Entry point
@@ -960,6 +1113,8 @@ def build_config(args) -> dict:
         config["gateway_host"] = args.gateway
     if args.port:
         config["gateway_port"] = args.port
+    if getattr(args, "protocol", None):
+        config["protocol"] = args.protocol
     return config
 
 
@@ -968,6 +1123,11 @@ def main():
     parser.add_argument("--gateway", default=None, help="Gateway IP override")
     parser.add_argument("--port", type=int, default=None, help="Gateway port override")
     parser.add_argument("--probe", action="store_true", help="Read all registers once and exit")
+    parser.add_argument("--protocol", choices=("tcp", "rtu_over_tcp"), default=None,
+                        help="Override transport (default from config)")
+    parser.add_argument("--soak", type=int, default=0, metavar="CYCLES",
+                        help="Read-only soak test: run N read cycles, tally "
+                             "ok/desync/exception/timeout, then exit")
     parser.add_argument("--debug", action="store_true", help="Verbose logging")
     args = parser.parse_args()
 
@@ -987,6 +1147,10 @@ def main():
                         datefmt="%Y-%m-%d %H:%M:%S", handlers=handlers)
 
     controller = SolisController(config)
+
+    if args.soak:
+        controller.soak(args.soak)
+        return
 
     if args.probe:
         controller.probe()

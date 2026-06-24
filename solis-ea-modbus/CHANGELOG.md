@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.0.15 — 2026-06-24
+
+### Changed
+- **Frame desyncs are now labelled honestly.** A reply whose Modbus function code doesn't
+  match the request is reported as `frame desync: sent fc 0xNN, got reply for fc 0xMM`
+  instead of the misleading `exception 0xNN for fc 0x02`/`0x01`. The add-on only ever issues
+  FC03/04/06, so the old "exception for fc 0x01/0x02" lines were never real inverter
+  exceptions — they were garbage/stale frames from the RTU↔TCP gateway.
+- **Block-read failures only log at WARNING when data is actually lost.** A failed chunk read
+  now gets one inline retry (the next transaction re-drains the socket, which clears most
+  transient desyncs); if it still fails it drops to the per-register fallback as before, but
+  the result logs at DEBUG when every register was recovered and at WARNING only when
+  specific registers returned no data. Removes the bulk of the routine fallback noise without
+  hiding genuine gaps.
+- **`Control interlock ENABLED` demoted to INFO.** Re-enabling control is the benign normal
+  state; only the safety-relevant `DISABLED` hard-stop stays at WARNING.
+
+### Performance
+- **Duplicate setpoints are coalesced.** Each cycle drains the whole command queue and keeps
+  only the last value per entity, and a write is skipped when the register already holds the
+  target value. A burst of identical/serial commands (e.g. Predbat re-sending
+  `discharge_current` several times a slot) now costs one write, not three.
+- **One fewer read per write.** `write_single` already reads each register back to confirm,
+  so the confirmed value is published directly instead of being re-read again in
+  `_publish_actual`. Cuts FC03 traffic on the control block by ~⅓ per write.
+
+### Added
+- **`--soak N` read-only diagnostic and `--protocol` override.** `--soak` runs N read passes
+  over the real register map and prints an ok/desync/exception/timeout tally; with
+  `--protocol {tcp,rtu_over_tcp}` it lets you compare transport quality empirically before
+  changing the configured protocol.
+
 ## 1.0.14 — 2026-06-16
 
 ### Fixed
