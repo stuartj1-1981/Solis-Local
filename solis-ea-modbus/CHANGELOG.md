@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.16 — 2026-06-26
+
+### Fixed
+- **Battery charge/discharge polarity now comes from the direction flag, not the register sign
+  bit.** `battery_power` (33149) and `battery_current` (33134) are unsigned magnitudes on the
+  S6-EA — the register sign bit is unreliable and flipped polarity between runs. They are now
+  read as unsigned and signed from flag 33135 (0=charge, 1=discharge): **+ = charge,
+  − = discharge**. Grid power (33130) and inverter AC power (33079) are true signed S32 and are
+  left unchanged.
+
 ## 1.0.15 — 2026-06-24
 
 ### Changed

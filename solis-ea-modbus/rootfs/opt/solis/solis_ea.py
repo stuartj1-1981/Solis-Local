@@ -49,7 +49,7 @@ except ImportError:  # pragma: no cover
     HAS_MQTT = False
     logging.warning("paho-mqtt not installed — MQTT publishing disabled")
 
-VERSION = "1.0.15"
+VERSION = "1.0.16"
 
 # =============================================================================
 # Defaults (overridden by environment variables from the S6 run script)
@@ -85,8 +85,11 @@ TELEMETRY = [
     {"oid": "battery_soc",          "addr": 33139, "words": 1, "signed": False, "scale": 1,    "unit": "%",   "dclass": "battery",     "sclass": "measurement", "name": "Battery SOC"},
     {"oid": "battery_soh",          "addr": 33140, "words": 1, "signed": False, "scale": 1,    "unit": "%",   "dclass": None,          "sclass": "measurement", "name": "Battery SOH", "icon": "mdi:battery-heart-variant"},
     {"oid": "battery_voltage",      "addr": 33141, "words": 1, "signed": False, "scale": 0.01, "unit": "V",   "dclass": "voltage",     "sclass": "measurement", "name": "Battery Voltage (BMS)"},
-    {"oid": "battery_current",      "addr": 33134, "words": 1, "signed": True,  "scale": 0.1,  "unit": "A",   "dclass": "current",     "sclass": "measurement", "name": "Battery Current"},
-    {"oid": "battery_power",        "addr": 33149, "words": 2, "signed": True,  "scale": 1,    "unit": "W",   "dclass": "power",       "sclass": "measurement", "name": "Battery Power"},
+    # battery_current/battery_power are UNSIGNED magnitudes on the S6-EA — the register sign bit is
+    # unreliable (it flipped polarity between runs). Sign them from the direction flag 33135 instead
+    # (0=charge -> +, 1=discharge -> -). See decode()/sign_flag.
+    {"oid": "battery_current",      "addr": 33134, "words": 1, "signed": False, "scale": 0.1,  "unit": "A",   "dclass": "current",     "sclass": "measurement", "name": "Battery Current", "sign_flag": 33135},
+    {"oid": "battery_power",        "addr": 33149, "words": 2, "signed": False, "scale": 1,    "unit": "W",   "dclass": "power",       "sclass": "measurement", "name": "Battery Power",   "sign_flag": 33135},
     {"oid": "inverter_ac_power",    "addr": 33079, "words": 2, "signed": True,  "scale": 1,    "unit": "W",   "dclass": "power",       "sclass": "measurement", "name": "Inverter AC Power"},
     {"oid": "grid_power",           "addr": 33130, "words": 2, "signed": True,  "scale": 1,    "unit": "W",   "dclass": "power",       "sclass": "measurement", "name": "Grid Power"},
     {"oid": "ac_voltage",          "addr": 33073, "words": 1, "signed": False, "scale": 0.1,  "unit": "V",   "dclass": "voltage",     "sclass": "measurement", "name": "AC Voltage"},
@@ -119,11 +122,11 @@ TELEMETRY_BLOCKS = [
     (33079, 2),    # inverter_ac_power (s32)
     (33093, 2),    # inverter_temperature, grid_frequency
     (33130, 2),    # grid_power (s32)
-    (33134, 2),    # battery_current, battery flag (33135)
+    (33134, 2),    # battery_current (unsigned mag), battery direction flag (33135)
     (33139, 2),    # battery_soc, battery_soh
     (33141, 1),    # battery_voltage
     (33147, 1),    # house_load (meter CT)
-    (33149, 2),    # battery_power (s32)
+    (33149, 2),    # battery_power (unsigned mag, signed from flag 33135)
     (33171, 1),    # grid_import_today (meter CT)
     (33175, 1),    # grid_export_today (meter CT)
     (33179, 1),    # house_load_today (meter CT)
@@ -223,6 +226,11 @@ def decode(regs: dict, spec: dict):
         val = regs[addr]
         if spec["signed"]:
             val = to_signed16(val)
+    # Some registers report an unsigned magnitude with direction carried in a separate flag
+    # register (e.g. battery 33135: 0=charge/+, 1=discharge/-). Apply that sign to the magnitude.
+    flag_addr = spec.get("sign_flag")
+    if flag_addr is not None and regs.get(flag_addr) == 1:
+        val = -val
     scale = spec["scale"]
     if scale != 1:
         return round(val * scale, 3)
