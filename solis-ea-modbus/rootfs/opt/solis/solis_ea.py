@@ -26,6 +26,9 @@
 #     0-100, export limit capped at the DNO approval, times range-checked.
 #   - A runtime "Control Enable" interlock switch can hard-stop all writes
 #     from the HA UI without uninstalling.
+#   - Reserve routing: a reserve <= overdischarge_soc_max goes to 43011 (bit 4 of
+#     43110 cleared); a higher reserve goes to Backup SOC 43024 with Reserve Battery
+#     Mode (43110 bit 4) set. The inverter refuses 43011 values above ~40.
 # =============================================================================
 
 import os
@@ -49,7 +52,7 @@ except ImportError:  # pragma: no cover
     HAS_MQTT = False
     logging.warning("paho-mqtt not installed — MQTT publishing disabled")
 
-VERSION = "1.0.16"
+VERSION = "1.0.17"
 
 # =============================================================================
 # Defaults (overridden by environment variables from the S6 run script)
@@ -69,6 +72,8 @@ DEFAULT_CONFIG = {
     "enable_control": True,
     "max_current_a": 105,         # hard clamp on charge/discharge current
     "export_limit_w": 10000,      # hard clamp on export power limit (DNO = 10 kW)
+    "overdischarge_soc_max": 40,  # highest reserve sent to 43011; above -> 43024 + Reserve Battery Mode
+    "reserve_hold_margin": 2,     # req in (SOC, SOC+margin] above the ceiling -> hold at SOC (0 = off)
     "socket_timeout": 4.0,
     "reconnect_delay": 2,
     "reconnect_max_delay": 60,
@@ -135,6 +140,13 @@ TELEMETRY_BLOCKS = [
 # Battery charge/discharge flag (FC04) — published as a text sensor.
 BATTERY_FLAG_ADDR = 33135
 
+# Reserve routing registers (see _apply_reserve / _publish_reserve).
+OVERDISCHARGE_SOC_ADDR = 43011   # self-use discharge floor; inverter refuses > ~40
+BACKUP_SOC_ADDR = 43024          # Reserve Battery Mode hold SOC; 0-100
+WORK_MODE_ADDR = 43110
+RESERVE_MODE_BIT = 0x10          # 43110 bit 4 "Reserve Battery Mode"
+BATTERY_SOC_ADDR = 33139
+
 # Discovery topics for sensors removed in past versions. send_all_discovery() clears
 # the retained config (empty payload) so HA drops the orphaned entity automatically.
 #   pv_power — removed in 1.0.13: the S6-EA is AC-coupled (no DC PV input), so PV DC
@@ -151,17 +163,26 @@ CONTROL = [
      "icon": "mdi:home-lightning-bolt"},
     {"oid": "work_mode_raw", "comp": "sensor", "addr": 43110, "name": "Work Mode (raw)",
      "icon": "mdi:cog", "ecat": "diagnostic"},
-    # Predbat-controlled discharge floor = self-use "Overdischarge SOC" (reg 43011): the SOC at
-    # which the inverter stops discharging in normal grid-tied operation. The old map used reg 43024
-    # = "Backup Mode SOC", inert unless Reserve/Backup mode (bit 4 of work-mode reg 43110) is on, so
-    # writes were echoed but ignored and it sat at its factory default 80. oid kept as "reserve_soc"
-    # so the HA entity_id and the Predbat `reserve:` wiring are unchanged.
-    {"oid": "reserve_soc", "comp": "number", "addr": 43011, "name": "Reserve SOC (Overdischarge)",
+    # Predbat-controlled reserve. Routed by value (special "reserve", see _apply_reserve):
+    #   - request <= overdischarge_soc_max (default 40): write Overdischarge SOC (reg 43011), the
+    #     self-use discharge floor, and clear Reserve Battery Mode (43110 bit 4).
+    #   - request >  overdischarge_soc_max: write Backup SOC (reg 43024), then set 43110 bit 4. The
+    #     inverter then holds the battery at 43024. 43011 refuses values above ~40.
+    # The state shows the last request while the add-on's own target is in place, else the
+    # effective value (43024 if bit 4 set, else 43011). oid kept as "reserve_soc" so the HA
+    # entity_id and the Predbat `reserve:` wiring are unchanged. "addr" is used only by --probe.
+    {"oid": "reserve_soc", "comp": "number", "addr": 43011, "name": "Reserve SOC",
+     "special": "reserve",
      "min": 0, "max": 100, "step": 1, "unit": "%", "icon": "mdi:battery-lock", "clamp": (0, 100)},
     # Read-only diagnostic: Backup Mode SOC (reg 43024). Only takes effect in Reserve/Backup mode.
     {"oid": "backup_soc", "comp": "sensor", "addr": 43024, "name": "Backup SOC (diagnostic)",
      "unit": "%", "dclass": "battery", "sclass": "measurement", "icon": "mdi:battery-lock",
      "ecat": "diagnostic"},
+    # Read-only diagnostic: Overdischarge SOC (reg 43011). The reserve_soc entity no longer shows
+    # 43011 directly (it shows the routed request), so this sensor shows the raw register.
+    {"oid": "overdischarge_soc", "comp": "sensor", "addr": 43011,
+     "name": "Overdischarge SOC (diagnostic)", "unit": "%", "dclass": "battery",
+     "sclass": "measurement", "icon": "mdi:battery-arrow-down", "ecat": "diagnostic"},
     {"oid": "export_limit", "comp": "number", "addr": 43074, "name": "Export Power Limit",
      "min": 0, "max_cfg": "export_limit_w", "step": 100, "unit": "W", "dclass": "power",
      "read_scale": 100, "write_div": 100, "icon": "mdi:transmission-tower-export"},
@@ -642,6 +663,10 @@ class SolisController:
         # Last-known raw holding-register values, refreshed every control poll. Used to
         # skip a write when the register already holds the target value (write suppression).
         self._reg_cache: dict = {}
+        # Reserve routing state.
+        self._last_soc = None          # int, from telemetry 33139
+        self._reserve_cmd = None       # last reserve request applied OK (after 0-100 clamp)
+        self._reserve_target = None    # (high: bool, addr: int, value: int) last applied by the add-on
 
     # ---- connection with exponential backoff --------------------------------
     def _connect_bus(self) -> bool:
@@ -717,6 +742,9 @@ class SolisController:
         regs = {}
         for start, count in TELEMETRY_BLOCKS:
             regs.update(self._read_block(0x04, start, count))
+        soc = regs.get(BATTERY_SOC_ADDR)
+        if soc is not None:
+            self._last_soc = soc  # used by the reserve hold-margin clamp; keep old value on a gap
         published = 0
         for s in TELEMETRY:
             val = decode(regs, s)
@@ -748,12 +776,15 @@ class SolisController:
             oid = c["oid"]
             if c.get("internal"):
                 continue
-            if c["comp"] == "select":
+            if c.get("special") == "reserve":
+                self._publish_reserve(regs)
+            elif c["comp"] == "select":
                 raw = regs.get(c["addr"])
                 if raw is not None:
                     rev = {v: k for k, v in c["options"].items()}
-                    if raw in rev:
-                        self.mqtt.publish(f"{base}/{oid}/state", rev[raw])
+                    key = self._work_mode_key(raw)
+                    if key in rev:
+                        self.mqtt.publish(f"{base}/{oid}/state", rev[key])
             elif c["comp"] == "sensor":
                 raw = regs.get(c["addr"])
                 if raw is not None:
@@ -827,13 +858,33 @@ class SolisController:
             return
 
         comp = spec["comp"]
+        if spec.get("special") == "reserve":
+            try:
+                req = float(payload)
+            except ValueError:
+                logging.warning("Non-numeric value for %s: %r", oid, payload)
+                self._publish_actual(spec)
+                return
+            lo, hi = spec["clamp"]
+            clamped = max(lo, min(hi, req))
+            if clamped != req:
+                logging.warning("CLAMPED %s: %s -> %s [%s..%s]", oid, req, clamped, lo, hi)
+            self._apply_reserve(spec, int(round(clamped)))
+            return
+
         if comp == "select":
             if payload not in spec["options"]:
                 logging.warning("Invalid work_mode option: %r", payload)
                 self._publish_actual(spec)
                 return
-            reg_val = spec["options"][payload]
-            if self._reg_cache.get(spec["addr"]) == reg_val:
+            # Bit 4 of 43110 (Reserve Battery Mode) belongs to the reserve logic. The select
+            # must never clear it, so keep the current bit 4 in the value we write.
+            wm = self._work_mode_now()
+            if wm is None:
+                self._publish_actual(spec)
+                return
+            reg_val = spec["options"][payload] | (wm & RESERVE_MODE_BIT)
+            if wm == reg_val:
                 logging.debug("Skip %s write: register already %d", oid, reg_val)
                 self._publish_from_values(spec, [(spec["addr"], reg_val)])
                 return
@@ -899,11 +950,14 @@ class SolisController:
         base = self.config["mqtt_base_topic"]
         oid, comp = spec["oid"], spec["comp"]
         vals = {addr: val for addr, val in writes}
-        if comp == "select":
+        if spec.get("special") == "reserve":
+            self._publish_reserve(self._reg_cache)
+        elif comp == "select":
             raw = vals.get(spec["addr"])
             rev = {v: k for k, v in spec["options"].items()}
-            if raw in rev:
-                self.mqtt.publish(f"{base}/{oid}/state", rev[raw])
+            key = self._work_mode_key(raw) if raw is not None else None
+            if key in rev:
+                self.mqtt.publish(f"{base}/{oid}/state", rev[key])
         elif comp == "number":
             raw = vals.get(spec["addr"])
             if raw is not None:
@@ -918,13 +972,18 @@ class SolisController:
         """Re-read the register(s) for one control and publish the real value."""
         base = self.config["mqtt_base_topic"]
         oid, comp = spec["oid"], spec["comp"]
+        if spec.get("special") == "reserve":
+            self._reread_reserve_regs()
+            self._publish_reserve(self._reg_cache)
+            return
         try:
             if comp in ("select", "sensor", "number"):
                 raw = self.modbus.read_holding(spec["addr"], 1)[0]
                 if comp == "select":
                     rev = {v: k for k, v in spec["options"].items()}
-                    if raw in rev:
-                        self.mqtt.publish(f"{base}/{oid}/state", rev[raw])
+                    key = self._work_mode_key(raw)
+                    if key in rev:
+                        self.mqtt.publish(f"{base}/{oid}/state", rev[key])
                 elif comp == "number":
                     self.mqtt.publish(f"{base}/{oid}/state",
                                       str(round(raw * spec.get("read_scale", 1), 1)))
@@ -937,6 +996,138 @@ class SolisController:
         except (ModbusError, OSError) as e:
             logging.warning("Could not re-read %s: %s", oid, e)
 
+    # ---- reserve routing (43011 / 43024 + 43110 bit 4) ----------------------
+    @staticmethod
+    def _work_mode_key(raw: int) -> int:
+        """Work-mode select reverse-lookup key: ignore bit 4 (Reserve Battery Mode), which the
+        reserve logic owns. A raw 51 (35 + bit 4) then shows "Self-Use + TOU + Grid Charge"."""
+        return raw & ~RESERVE_MODE_BIT & 0xFFFF
+
+    def _work_mode_now(self):
+        """Current 43110 value: from the cache, else one FC03 read. None if the read fails."""
+        wm = self._reg_cache.get(WORK_MODE_ADDR)
+        if wm is not None:
+            return wm
+        try:
+            wm = self.modbus.read_holding(WORK_MODE_ADDR, 1)[0]
+        except (ModbusError, OSError) as e:
+            logging.warning("Could not read work mode reg %d: %s", WORK_MODE_ADDR, e)
+            return None
+        self._reg_cache[WORK_MODE_ADDR] = wm
+        return wm
+
+    def _reserve_plan(self, req: int) -> tuple:
+        """Return (high, addr, value) for a reserve request (already clamped 0-100).
+        high = Reserve Battery Mode on (value goes to 43024); else value goes to 43011.
+        Hold-margin clamp (anti-ratchet): above the 43011 ceiling, a request in
+        (SOC, SOC + margin] holds at the current SOC, so grid charge in Reserve Battery
+        Mode cannot creep the hold up 1 % per Predbat cycle."""
+        ceiling = self.config["overdischarge_soc_max"]
+        margin = self.config["reserve_hold_margin"]
+        value = req
+        if req > ceiling and margin > 0 and self._last_soc is not None:
+            if self._last_soc < req <= self._last_soc + margin:
+                value = self._last_soc
+        if value <= ceiling:
+            return (False, OVERDISCHARGE_SOC_ADDR, value)
+        return (True, BACKUP_SOC_ADDR, value)
+
+    def _apply_reserve(self, spec, req: int):
+        """Apply a reserve request. Write order is fixed so the inverter never sees Reserve
+        Battery Mode with a stale Backup SOC:
+          going high: 43024 first, then set 43110 bit 4;
+          going low:  43011 first, then clear 43110 bit 4.
+        If the first write fails, the second is not done."""
+        base = self.config["mqtt_base_topic"]
+        topic = f"{base}/{spec['oid']}/state"
+        high, addr, value = self._reserve_plan(req)
+
+        wm = self._work_mode_now()
+        if wm is None:
+            logging.warning("Reserve %d not applied: work mode reg %d unreadable", req, WORK_MODE_ADDR)
+            self._reserve_failed(spec, req, None)
+            return
+        bit_set = bool(wm & RESERVE_MODE_BIT)
+
+        if bit_set == high and self._reg_cache.get(addr) == value:
+            self._reserve_cmd = req
+            self._reserve_target = (high, addr, value)
+            self.mqtt.publish(topic, str(req))
+            logging.debug("Skip reserve write: %d already in place (reg %d=%d, Reserve Battery "
+                          "Mode %s)", req, addr, value, "ON" if high else "OFF")
+            return
+
+        old_val = self._reg_cache.get(addr)
+        if old_val != value:
+            if not self.modbus.write_single(addr, value):
+                self._reserve_failed(spec, req, addr)
+                return
+            self._reg_cache[addr] = value
+
+        new_wm = wm
+        if high and not bit_set:
+            new_wm = wm | RESERVE_MODE_BIT
+        elif not high and bit_set:
+            new_wm = wm & ~RESERVE_MODE_BIT & 0xFFFF
+        if new_wm != wm:
+            if not self.modbus.write_single(WORK_MODE_ADDR, new_wm):
+                self._reserve_failed(spec, req, WORK_MODE_ADDR)
+                return
+            self._reg_cache[WORK_MODE_ADDR] = new_wm
+
+        self._reserve_cmd = req
+        self._reserve_target = (high, addr, value)
+        self.mqtt.publish(topic, str(req))
+        dest = "Backup SOC" if high else "Overdischarge SOC"
+        note = " (hold margin)" if value != req else ""
+        mode = ""
+        if new_wm != wm:
+            mode = ", Reserve Battery Mode %s (%d %d->%d)" % (
+                "ON" if high else "OFF", WORK_MODE_ADDR, wm, new_wm)
+        logging.info("Reserve %d -> %s %d=%d%s%s", req, dest, addr, value, note, mode)
+
+    def _reserve_failed(self, spec, req: int, failed_addr):
+        """A reserve write failed: forget the target, re-read the registers and publish the
+        effective value so Predbat sees the real state and retries."""
+        self._reserve_cmd = None
+        self._reserve_target = None
+        if failed_addr is not None:
+            hint = ""
+            if failed_addr == OVERDISCHARGE_SOC_ADDR:
+                hint = (" — the inverter refused reg %d; overdischarge_soc_max (%d) is probably "
+                        "too high for this unit, lower it" % (
+                            OVERDISCHARGE_SOC_ADDR, self.config["overdischarge_soc_max"]))
+            logging.warning("Reserve %d FAILED: write to reg %d refused%s", req, failed_addr, hint)
+        self._reread_reserve_regs()
+        self._publish_reserve(self._reg_cache)
+
+    def _reread_reserve_regs(self):
+        """Refresh 43110, 43011 and 43024 in the cache. A failed read keeps the cached value."""
+        for a in (WORK_MODE_ADDR, OVERDISCHARGE_SOC_ADDR, BACKUP_SOC_ADDR):
+            try:
+                self._reg_cache[a] = self.modbus.read_holding(a, 1)[0]
+            except (ModbusError, OSError) as e:
+                logging.warning("Could not re-read reg %d: %s", a, e)
+
+    def _publish_reserve(self, regs):
+        """Publish reserve_soc state. Show the last request while the add-on's own target is
+        in place (also when the hold-margin clamp changed the written value), so Predbat's
+        request/state compare matches. Otherwise (e.g. changed in the Solis app) show the
+        effective value: 43024 if Reserve Battery Mode is on, else 43011."""
+        wm = regs.get(WORK_MODE_ADDR)
+        if wm is None:
+            return  # keep last published value
+        high = bool(wm & RESERVE_MODE_BIT)
+        addr = BACKUP_SOC_ADDR if high else OVERDISCHARGE_SOC_ADDR
+        actual = regs.get(addr)
+        if actual is None:
+            return
+        if self._reserve_cmd is not None and self._reserve_target == (high, addr, actual):
+            val = self._reserve_cmd
+        else:
+            val = actual
+        self.mqtt.publish(f"{self.config['mqtt_base_topic']}/reserve_soc/state", str(val))
+
     # ---- main loop ----------------------------------------------------------
     def run(self):
         self.running = True
@@ -948,6 +1139,8 @@ class SolisController:
         logging.info("  Control: %s | max current %s A | export <= %s W",
                      self.config["enable_control"], self.config["max_current_a"],
                      self.config["export_limit_w"])
+        logging.info("  Reserve: overdischarge_soc_max %s | reserve_hold_margin %s",
+                     self.config["overdischarge_soc_max"], self.config["reserve_hold_margin"])
         logging.info("  Poll %ss | inter-frame %sms | MQTT %s",
                      self.config["poll_interval"], self.config["inter_frame_ms"],
                      "on" if HAS_MQTT else "off")
@@ -1107,6 +1300,8 @@ def build_config(args) -> dict:
         "ENABLE_CONTROL": ("enable_control", lambda v: str(v).lower() in ("1", "true", "yes", "on")),
         "MAX_CURRENT_A": ("max_current_a", int),
         "EXPORT_LIMIT_W": ("export_limit_w", int),
+        "OVERDISCHARGE_SOC_MAX": ("overdischarge_soc_max", int),
+        "RESERVE_HOLD_MARGIN": ("reserve_hold_margin", int),
         "LOG_DIR": ("log_dir", str),
     }
     for env_key, (cfg_key, conv) in env_map.items():

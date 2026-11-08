@@ -63,16 +63,22 @@ set `protocol: rtu_over_tcp`.
 | `enable_control` | `true` | Expose writable control entities |
 | `max_current_a` | `105` | **Hard clamp** on charge/discharge current |
 | `export_limit_w` | `10000` | Upper clamp for export power write (DNO = 10 kW) |
+| `overdischarge_soc_max` | `40` | Highest reserve written to Overdischarge SOC (43011). The inverter refuses higher values. Above this, the reserve goes to Backup SOC (43024) with Reserve Battery Mode on |
+| `reserve_hold_margin` | `2` | Reserve request up to this many % above SOC (above `overdischarge_soc_max`) holds at the current SOC. Stops grid charge creeping up during a hold. 0 = off |
 | `debug` | `false` | Log every frame |
 
 ## Entities
 
 ### Telemetry (`sensor.*`)
 
-Battery SOC, SOH, voltage (BMS reg 33141), current, power · Inverter AC power · Grid power ·
-PV DC power (0 — AC-coupled) · AC voltage · Grid frequency · Energy today · Inverter
-temperature · Battery charge/discharge state · plus a **Gateway Status** connectivity
-binary_sensor (availability + LWT).
+Battery SOC, SOH, voltage (BMS reg 33141), current, power (+ = charge, − = discharge, from
+flag 33135) · Inverter AC power · Grid power · AC voltage · Grid frequency · PV generation
+today · Inverter temperature · House load · Grid import / export today · House load today ·
+Battery charge/discharge state · plus a **Gateway Status** connectivity binary_sensor
+(availability + LWT).
+
+There is no PV DC power sensor. The S6-EA is AC-coupled (removed in 1.0.13). Get live PV
+power from the PV inverter's own integration.
 
 ### Control (`number.*`, `select.*`, `text.*`, `switch.*`)
 
@@ -80,13 +86,34 @@ binary_sensor (availability + LWT).
 |---|---|---|---|
 | Work Mode | select | 43110 | Self-Use / +TOU / +TOU+Grid Charge (35) |
 | Work Mode (raw) | sensor | 43110 | bitfield, diagnostic |
-| Reserve SOC (Backup) | number | 43024 | 0–100 % |
+| Reserve SOC | number | 43011 (≤ `overdischarge_soc_max`) or 43024 + 43110 bit 4 (above) | 0–100 % |
+| Overdischarge SOC (diagnostic) | sensor | 43011 | read-only |
+| Backup SOC (diagnostic) | sensor | 43024 | read-only |
 | Export Power Limit | number | 43074 (×100 W) | 0–`export_limit_w` |
 | Charge Current Limit | number | 43141 | 0–`max_current_a` A |
 | Discharge Current Limit | number | 43142 | 0–`max_current_a` A |
 | Charge Start / End (slot 1) | text | 43143/44, 43145/46 | HH:MM |
 | Discharge Start / End (slot 1) | text | 43147/48, 43149/50 | HH:MM |
 | Control Enable | switch | *(interlock)* | ON/OFF |
+
+**Reserve routing.** The inverter refuses Overdischarge SOC (43011) values above about 40.
+A reserve request ≤ `overdischarge_soc_max` goes to 43011 and clears 43110 bit 4. A higher
+request goes to Backup SOC (43024), then sets 43110 bit 4 (Reserve Battery Mode), and the
+inverter holds the battery at 43024. Going high, 43024 is written before bit 4 is set; going
+low, 43011 is written before bit 4 is cleared. The Reserve SOC entity shows the last request
+while the add-on's target is in place. If the registers are changed elsewhere, it shows the
+effective value (43024 when bit 4 is set, else 43011).
+
+> **The add-on owns 43110 bit 4.** A low reserve from Predbat turns off the Solis app
+> "battery reserve" switch. The Work Mode select keeps bit 4 as it is.
+
+> **Discharge Current Limit (43142) applies only inside a timed discharge slot.** It does not
+> limit Self-Use discharge. Setting it to 0 does not stop the battery discharging; Predbat's
+> hold relies on the reserve.
+
+> In Reserve Battery Mode with grid charge on (work mode 35 → raw 51), the inverter charges
+> from the grid up to 43024. `reserve_hold_margin` stops a Predbat "SOC + 1" hold from
+> pushing 43024 up 1 % per cycle.
 
 This add-on drives the **legacy Time-Charging** scheme only. The V2 *Grid Time of Use*
 registers (43707+/43753+) and the RC force registers (43135/43129) are **deliberately not
@@ -101,7 +128,7 @@ exposed** — both are unused/no-op on the EA.
 - Charge/discharge current writes are **clamped to `max_current_a` (default 105 A)**. A 125 A
   write previously caused a standby fault — the clamp makes that unreachable from HA.
 - Export limit writes are clamped to `export_limit_w`.
-- Reserve SOC 0–100; times range-checked to HH 0–23 / MM 0–59.
+- Reserve SOC 0–100 (routed to 43011 or 43024, see above); times range-checked to HH 0–23 / MM 0–59.
 - **Control Enable = OFF** rejects every register write (and reverts the HA entity to the
   inverter's true value). Set `enable_control: false` for a fully read-only deployment.
 - No EPS/EPS-backup is exposed — the EA has none; use V2L for outage cover.
@@ -143,12 +170,19 @@ template:
   soc_max:      32.2
   inverter_limit: 5000
   battery_rate_max: 5000            # ~105 A * ~48 V
-  reserve:      number.solis_ea_inverter_reserve_soc_backup
+  reserve:      number.solis_ea_inverter_reserve_soc
   charge_rate:    number.solis_ea_inverter_charge_current_limit
   discharge_rate: number.solis_ea_inverter_discharge_current_limit
   charge_start_service:    script.solis_predbat_charge_start
   discharge_start_service: script.solis_predbat_discharge_start
 ```
+
+> **`reserve` entity_id.** HA makes the entity_id from the display name at first install, and
+> keeps it after a rename. A new install (1.0.17 or later) gets
+> `number.solis_ea_inverter_reserve_soc`. An older install keeps its first entity_id, for
+> example `..._reserve_soc_backup` or `..._reserve_soc_overdischarge`. Do not change your
+> Predbat `reserve:` line on an existing install. Check the entity_id in **Developer Tools →
+> States**.
 
 > Predbat's `*_rate` are powers (W); the add-on's current entities are amps. Either feed the
 > rate scripts an A value (W ÷ ~48 V, then clamped to `max_current_a`), or map rates to your

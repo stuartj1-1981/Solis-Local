@@ -1,6 +1,6 @@
 name: "Solis EA Modbus Control"
 description: "Active Modbus master for the Solis S6-EA hybrid inverter via a Waveshare RS485 gateway. Polls telemetry and exposes Predbat-ready, safety-clamped control entities over MQTT auto-discovery."
-version: "1.0.16"
+version: "1.0.17"
 slug: "solis_ea_modbus"
 url: "https://github.com/stuartj1-1981/Solis-Local"
 arch:
@@ -26,6 +26,8 @@ options:
   enable_control: true
   max_current_a: 105
   export_limit_w: 10000
+  overdischarge_soc_max: 40
+  reserve_hold_margin: 2
   debug: false
 schema:
   gateway_host: str
@@ -41,6 +43,8 @@ schema:
   enable_control: bool
   max_current_a: "int(1,105)"
   export_limit_w: "int(0,10000)"
+  overdischarge_soc_max: "int(5,100)"
+  reserve_hold_margin: "int(0,5)"
   debug: bool
 services:
   - mqtt:need

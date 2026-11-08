@@ -13,6 +13,8 @@ INTER_FRAME_MS=$(bashio::config 'inter_frame_ms')
 ENABLE_CONTROL=$(bashio::config 'enable_control')
 MAX_CURRENT_A=$(bashio::config 'max_current_a')
 EXPORT_LIMIT_W=$(bashio::config 'export_limit_w')
+OVERDISCHARGE_SOC_MAX=$(bashio::config 'overdischarge_soc_max')
+RESERVE_HOLD_MARGIN=$(bashio::config 'reserve_hold_margin')
 DEBUG=$(bashio::config 'debug')
 
 # MQTT: prefer add-on options, fall back to HA MQTT service discovery
@@ -47,6 +49,8 @@ export INTER_FRAME_MS
 export ENABLE_CONTROL
 export MAX_CURRENT_A
 export EXPORT_LIMIT_W
+export OVERDISCHARGE_SOC_MAX
+export RESERVE_HOLD_MARGIN
 export LOG_DIR="/config"
 
 if bashio::var.true "${DEBUG}"; then
@@ -56,7 +60,7 @@ fi
 bashio::log.info "Starting Solis EA Modbus Control"
 bashio::log.info "  Gateway: ${GATEWAY_HOST}:${GATEWAY_PORT} (${PROTOCOL}), unit ${SLAVE_ADDRESS}"
 bashio::log.info "  MQTT: ${MQTT_HOST}:${MQTT_PORT}"
-bashio::log.info "  Control: ${ENABLE_CONTROL} (max current ${MAX_CURRENT_A} A, export <= ${EXPORT_LIMIT_W} W)"
+bashio::log.info "  Control: ${ENABLE_CONTROL} (max current ${MAX_CURRENT_A} A, export <= ${EXPORT_LIMIT_W} W, overdischarge_soc_max ${OVERDISCHARGE_SOC_MAX}, reserve_hold_margin ${RESERVE_HOLD_MARGIN})"
 bashio::log.info "  Poll: ${POLL_INTERVAL}s, inter-frame ${INTER_FRAME_MS}ms"
 
 mkdir -p "${LOG_DIR}"

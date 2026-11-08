@@ -52,6 +52,14 @@
       "name": "Max Export Power (W)",
       "description": "Upper clamp for the backflow (export) power limit write. DNO export approval is 10 kW."
     },
+    "overdischarge_soc_max": {
+      "name": "Overdischarge SOC Max (%)",
+      "description": "Highest reserve written to Overdischarge SOC (43011). The inverter refuses higher values. Above this, the reserve goes to Backup SOC (43024) with Reserve Battery Mode on."
+    },
+    "reserve_hold_margin": {
+      "name": "Reserve Hold Margin (%)",
+      "description": "If Predbat asks for a reserve up to this many % above the current SOC, hold at the current SOC. This stops grid charging creeping up during a hold. 0 = off."
+    },
     "debug": {
       "name": "Debug Logging",
       "description": "Enable verbose debug output (logs every Modbus frame)"
