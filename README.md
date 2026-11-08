@@ -71,10 +71,14 @@ set `protocol: rtu_over_tcp`.
 
 ### Telemetry (`sensor.*`)
 
-Battery SOC, SOH, voltage (BMS reg 33141), current, power · Inverter AC power · Grid power ·
-PV DC power (0 — AC-coupled) · AC voltage · Grid frequency · Energy today · Inverter
-temperature · Battery charge/discharge state · plus a **Gateway Status** connectivity
-binary_sensor (availability + LWT).
+Battery SOC, SOH, voltage (BMS reg 33141), current, power (+ = charge, − = discharge, from
+flag 33135) · Inverter AC power · Grid power · AC voltage · Grid frequency · PV generation
+today · Inverter temperature · House load · Grid import / export today · House load today ·
+Battery charge/discharge state · plus a **Gateway Status** connectivity binary_sensor
+(availability + LWT).
+
+There is no PV DC power sensor. The S6-EA is AC-coupled (removed in 1.0.13). Get live PV
+power from the PV inverter's own integration.
 
 ### Control (`number.*`, `select.*`, `text.*`, `switch.*`)
 
@@ -166,12 +170,19 @@ template:
   soc_max:      32.2
   inverter_limit: 5000
   battery_rate_max: 5000            # ~105 A * ~48 V
-  reserve:      number.solis_ea_inverter_reserve_soc_backup
+  reserve:      number.solis_ea_inverter_reserve_soc
   charge_rate:    number.solis_ea_inverter_charge_current_limit
   discharge_rate: number.solis_ea_inverter_discharge_current_limit
   charge_start_service:    script.solis_predbat_charge_start
   discharge_start_service: script.solis_predbat_discharge_start
 ```
+
+> **`reserve` entity_id.** HA makes the entity_id from the display name at first install, and
+> keeps it after a rename. A new install (1.0.17 or later) gets
+> `number.solis_ea_inverter_reserve_soc`. An older install keeps its first entity_id, for
+> example `..._reserve_soc_backup` or `..._reserve_soc_overdischarge`. Do not change your
+> Predbat `reserve:` line on an existing install. Check the entity_id in **Developer Tools →
+> States**.
 
 > Predbat's `*_rate` are powers (W); the add-on's current entities are amps. Either feed the
 > rate scripts an A value (W ÷ ~48 V, then clamped to `max_current_a`), or map rates to your

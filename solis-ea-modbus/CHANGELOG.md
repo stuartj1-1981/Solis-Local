@@ -37,6 +37,12 @@
 - Documented: Discharge Current Limit (43142) applies only inside a timed discharge slot. It
   does not limit Self-Use discharge.
 
+### Documentation
+- README: telemetry list updated (removed PV DC power, gone since 1.0.13; added house load,
+  grid import/export today, house load today, battery sign convention).
+- README: Predbat `reserve:` example now shows `number.solis_ea_inverter_reserve_soc`, with a
+  note that an existing install keeps its first entity_id.
+
 ## 1.0.16 — 2026-06-26
 
 ### Fixed
