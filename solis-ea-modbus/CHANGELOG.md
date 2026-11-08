@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.0.17 — 2026-11-08
+
+### Fixed
+- **Predbat reserve above ~40 % now holds the battery.** The inverter refuses Overdischarge
+  SOC (43011) values above about 40 and keeps the old value, so a Predbat "hold for car"
+  (reserve = SOC + 1) failed with `write to reserve failed` and the battery discharged into
+  the car. The `reserve_soc` entity now routes by value:
+  - request ≤ `overdischarge_soc_max` (default 40): write 43011, clear 43110 bit 4;
+  - request > `overdischarge_soc_max`: write Backup SOC 43024, then set 43110 bit 4
+    (Reserve Battery Mode). The inverter holds the battery at 43024.
+
+  Write order is fixed: going high, 43024 before bit 4; going low, 43011 before clearing
+  bit 4. If the first write fails, the second is not done. The oid, unique_id, MQTT topics,
+  HA entity_id and the Predbat `reserve:` mapping do not change.
+
+### Added
+- **`overdischarge_soc_max` option** (default 40): the highest reserve written to 43011.
+- **`reserve_hold_margin` option** (default 2, 0 = off): anti-ratchet clamp. In Reserve
+  Battery Mode with grid charge on, the inverter charges from the grid up to 43024. Above the
+  43011 ceiling, a request in (SOC, SOC + margin] is written as the current SOC, so the hold
+  cannot creep up 1 % per Predbat cycle. If the clamped value is ≤ `overdischarge_soc_max`,
+  it goes to 43011.
+- **Overdischarge SOC (diagnostic) sensor** (43011, read-only).
+
+### Changed
+- **The add-on now owns 43110 bit 4.** A low reserve request clears bit 4, also when the
+  Solis app "battery reserve" switch set it.
+- **Reserve SOC state shows the commanded value** while the add-on's own target is in place
+  (also when the hold margin changed the written value). If the registers do not match the
+  add-on's last target (for example, changed in the Solis app), it shows the effective value:
+  43024 if bit 4 is set, else 43011.
+- **Work Mode select keeps bit 4.** It writes `option | (43110 & 0x10)`, and the state ignores
+  bit 4, so a raw 51 shows "Self-Use + TOU + Grid Charge". The options do not change.
+- **Display name** of `reserve_soc` is now "Reserve SOC". The entity_id does not change.
+- Documented: Discharge Current Limit (43142) applies only inside a timed discharge slot. It
+  does not limit Self-Use discharge.
+
 ## 1.0.16 — 2026-06-26
 
 ### Fixed
